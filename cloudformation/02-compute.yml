@@ -397,27 +397,27 @@ Resources:
           docker run --rm \
             -v openclaw_workspace:/data:ro \
             -v "$BACKUP_DIR":/backup \
-            alpine tar -czf "/backup/workspace-${TIMESTAMP}.tar.gz" -C /data .
+            alpine tar -czf "/backup/workspace-${!TIMESTAMP}.tar.gz" -C /data .
 
           # Backup config (openclaw.json, agent settings)
           docker run --rm \
             -v openclaw_config:/data:ro \
             -v "$BACKUP_DIR":/backup \
-            alpine tar -czf "/backup/config-${TIMESTAMP}.tar.gz" -C /data .
+            alpine tar -czf "/backup/config-${!TIMESTAMP}.tar.gz" -C /data .
 
           # Upload to S3
-          aws s3 cp "$BACKUP_DIR/workspace-${TIMESTAMP}.tar.gz" \
-            "s3://${BUCKET}/workspace/${TIMESTAMP}.tar.gz" \
+          aws s3 cp "$BACKUP_DIR/workspace-${!TIMESTAMP}.tar.gz" \
+            "s3://${!BUCKET}/workspace/${!TIMESTAMP}.tar.gz" \
             --storage-class STANDARD_IA --region us-east-1
 
-          aws s3 cp "$BACKUP_DIR/config-${TIMESTAMP}.tar.gz" \
-            "s3://${BUCKET}/config/${TIMESTAMP}.tar.gz" \
+          aws s3 cp "$BACKUP_DIR/config-${!TIMESTAMP}.tar.gz" \
+            "s3://${!BUCKET}/config/${!TIMESTAMP}.tar.gz" \
             --storage-class STANDARD_IA --region us-east-1
 
           # Cleanup local temp
           rm -rf "$BACKUP_DIR"
 
-          log "Backup completed: workspace-${TIMESTAMP}, config-${TIMESTAMP}"
+          log "Backup completed: workspace-${!TIMESTAMP}, config-${!TIMESTAMP}"
           BACKUP
           chmod +x /opt/openclaw/scripts/backup.sh
 
@@ -432,19 +432,19 @@ Resources:
           RESTORE_DIR="/tmp/openclaw-restore"
 
           echo "Available workspace backups:"
-          aws s3 ls "s3://${BUCKET}/workspace/" --region us-east-1 | tail -10
+          aws s3 ls "s3://${!BUCKET}/workspace/" --region us-east-1 | tail -10
 
           echo ""
           read -p "Enter backup timestamp (e.g., 20260624-120000): " TIMESTAMP
 
-          if [ -z "$TIMESTAMP" ]; then
+          if [ -z "${!TIMESTAMP}" ]; then
             echo "ERROR: No timestamp provided. Aborting."
             exit 1
           fi
 
           echo "WARNING: This will stop OpenClaw and replace current data."
           read -p "Continue? (yes/no): " CONFIRM
-          if [ "$CONFIRM" != "yes" ]; then
+          if [ "${!CONFIRM}" != "yes" ]; then
             echo "Aborted."
             exit 0
           fi
@@ -456,10 +456,10 @@ Resources:
           docker compose down
 
           # Download from S3
-          aws s3 cp "s3://${BUCKET}/workspace/${TIMESTAMP}.tar.gz" \
+          aws s3 cp "s3://${!BUCKET}/workspace/${!TIMESTAMP}.tar.gz" \
             "$RESTORE_DIR/workspace.tar.gz" --region us-east-1
 
-          aws s3 cp "s3://${BUCKET}/config/${TIMESTAMP}.tar.gz" \
+          aws s3 cp "s3://${!BUCKET}/config/${!TIMESTAMP}.tar.gz" \
             "$RESTORE_DIR/config.tar.gz" --region us-east-1 || echo "No config backup found, skipping."
 
           # Restore workspace
