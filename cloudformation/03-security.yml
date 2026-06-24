@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OpenClaw Security Stack — Security Groups with minimal attack surface.
+  Telegram long polling = no inbound ports required for messaging.
+  Ports 80/443 optional for OpenClaw Control UI access.
+
+# ==============================================================================
+# Parameters
+# ==============================================================================
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: openclaw-ronaldo
+    Description: Prefix for resource naming
+
+  EnableControlUI:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Enable inbound HTTPS (443) and HTTP (80) for OpenClaw Control UI via Caddy.
+      Set to 'false' if only using Telegram long polling (no inbound needed).
+
+# ==============================================================================
+# Conditions
+# ==============================================================================
+Conditions:
+  ControlUIEnabled: !Equals [!Ref EnableControlUI, 'true']
+
+# ==============================================================================
+# Resources
+# ==============================================================================
+Resources:
+
+  # --------------------------------------------------------------------------
+  # Security Group — OpenClaw EC2 Instance
+  # --------------------------------------------------------------------------
+  OpenClawSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${EnvironmentName}-sg'
+      GroupDescription: >
+        Security group for OpenClaw EC2 instance.
+        Inbound: HTTPS/HTTP for Control UI (optional).
+        Outbound: HTTPS for LLM APIs + Telegram API, DNS.
+        SSH disabled — access via SSM Session Manager only.
+      VpcId:
+        Fn::ImportValue: !Sub '${EnvironmentName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-sg'
+        - Key: Project
+          Value: !Ref EnvironmentName
+
+  # --------------------------------------------------------------------------
+  # Inbound Rules (conditional — only if Control UI enabled)
+  # --------------------------------------------------------------------------
+  IngressHTTPS:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: ControlUIEnabled
+    Properties:
+      GroupId: !Ref OpenClawSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: '0.0.0.0/0'
+      Description: 'HTTPS — OpenClaw Control UI via Caddy (optional)'
+
+  IngressHTTP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: ControlUIEnabled
+    Properties:
+      GroupId: !Ref OpenClawSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: '0.0.0.0/0'
+      Description: 'HTTP — Redirect to HTTPS via Caddy'
+
+  # --------------------------------------------------------------------------
+  # Outbound Rules — Explicitly defined (deny-all-except)
+  # --------------------------------------------------------------------------
+  EgressHTTPS:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref OpenClawSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: '0.0.0.0/0'
+      Description: 'HTTPS — LLM APIs (Claude/OpenAI/Gemini) + Telegram API + npm'
+
+  EgressDNS_UDP:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref OpenClawSecurityGroup
+      IpProtocol: udp
+      FromPort: 53
+      ToPort: 53
+      CidrIp: '0.0.0.0/0'
+      Description: 'DNS resolution (UDP)'
+
+  EgressDNS_TCP:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref OpenClawSecurityGroup
+      IpProtocol: tcp
+      FromPort: 53
+      ToPort: 53
+      CidrIp: '0.0.0.0/0'
+      Description: 'DNS resolution (TCP fallback)'
+
+  EgressHTTP:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref OpenClawSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: '0.0.0.0/0'
+      Description: 'HTTP — Package downloads, Let''s Encrypt ACME challenges'
+
+# ==============================================================================
+# Outputs
+# ==============================================================================
+Outputs:
+  SecurityGroupId:
+    Description: OpenClaw Security Group ID
+    Value: !Ref OpenClawSecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-SecurityGroupId'

@@ -1,0 +1,40 @@
+# ==============================================================================
+# OpenClaw Reverse Proxy — Caddy Configuration
+# ==============================================================================
+#
+# USAGE:
+#   - Replace :443 below with your domain for automatic Let's Encrypt certs
+#     Example: openclaw.yourdomain.com
+#   - With just :443, Caddy uses a self-signed certificate
+#   - For Telegram-only (long polling), this is OPTIONAL
+#
+# ==============================================================================
+
+:443 {
+  reverse_proxy openclaw:18789
+
+  # Security headers
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    X-XSS-Protection "1; mode=block"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+    -Server
+  }
+
+  # Access logging
+  log {
+    output file /data/caddy/access.log {
+      roll_size 10mb
+      roll_keep 5
+    }
+    format json
+  }
+}
+
+# HTTP → HTTPS redirect
+:80 {
+  redir https://{host}{uri} permanent
+}

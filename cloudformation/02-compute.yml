@@ -1,0 +1,536 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OpenClaw Compute Stack — EC2 t4g.medium (Graviton ARM64), EBS gp3 encrypted,
+  Elastic IP, IAM Role with least-privilege, SSM Session Manager access.
+
+# ==============================================================================
+# Parameters
+# ==============================================================================
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: openclaw-ronaldo
+    Description: Prefix for resource naming
+
+  InstanceType:
+    Type: String
+    Default: t4g.medium
+    AllowedValues:
+      - t4g.small
+      - t4g.medium
+      - t4g.large
+    Description: EC2 instance type (ARM64 Graviton)
+
+  VolumeSize:
+    Type: Number
+    Default: 20
+    MinValue: 10
+    MaxValue: 100
+    Description: Root EBS volume size in GB
+
+  BackupBucketName:
+    Type: String
+    Default: openclaw-ronaldo-backups
+    Description: S3 bucket name for backups
+
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: Email for SNS notifications (leave empty to skip)
+
+# ==============================================================================
+# Mappings — Ubuntu 24.04 LTS ARM64 AMIs by region
+# ==============================================================================
+Mappings:
+  RegionAMI:
+    us-east-1:
+      AMI: ami-0a7a4e87939439934  # Ubuntu 24.04 LTS ARM64 — us-east-1 (verify latest)
+
+# ==============================================================================
+# Conditions
+# ==============================================================================
+Conditions:
+  HasNotificationEmail: !Not [!Equals [!Ref NotificationEmail, '']]
+
+# ==============================================================================
+# Resources
+# ==============================================================================
+Resources:
+
+  # --------------------------------------------------------------------------
+  # S3 Bucket — Backups
+  # --------------------------------------------------------------------------
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BackupBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 90
+          - Id: DeleteOldBackups
+            Status: Enabled
+            ExpirationInDays: 180
+      Tags:
+        - Key: Project
+          Value: !Ref EnvironmentName
+
+  # --------------------------------------------------------------------------
+  # IAM Role — EC2 Instance (Least Privilege)
+  # --------------------------------------------------------------------------
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-ec2-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      # SSM Session Manager — managed policy
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        # S3 Backup access
+        - PolicyName: S3BackupAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${BackupBucketName}'
+                  - !Sub 'arn:aws:s3:::${BackupBucketName}/*'
+        # CloudWatch Logs & Metrics
+        - PolicyName: CloudWatchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: us-east-1
+      Tags:
+        - Key: Project
+          Value: !Ref EnvironmentName
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${EnvironmentName}-instance-profile'
+      Roles:
+        - !Ref EC2Role
+
+  # --------------------------------------------------------------------------
+  # Elastic IP
+  # --------------------------------------------------------------------------
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-eip'
+
+  ElasticIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIP.AllocationId
+      InstanceId: !Ref EC2Instance
+
+  # --------------------------------------------------------------------------
+  # EC2 Instance — OpenClaw Server
+  # --------------------------------------------------------------------------
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !FindInMap [RegionAMI, !Ref 'AWS::Region', AMI]
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId:
+        Fn::ImportValue: !Sub '${EnvironmentName}-PublicSubnetId'
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub '${EnvironmentName}-SecurityGroupId'
+      # EBS Root Volume — gp3, encrypted
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: !Ref VolumeSize
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: false
+            Iops: 3000
+            Throughput: 125
+      # IMDSv2 enforced — prevents SSRF credential theft
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      # Monitoring
+      Monitoring: true
+      # User Data — Bootstrap script
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee /var/log/user-data.log) 2>&1
+          echo "=== OpenClaw Bootstrap — $(date) ==="
+
+          # ---------------------------------------------------------------
+          # 1. System updates
+          # ---------------------------------------------------------------
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+
+          # ---------------------------------------------------------------
+          # 2. Install Docker
+          # ---------------------------------------------------------------
+          curl -fsSL https://get.docker.com | sh
+          usermod -aG docker ubuntu
+          systemctl enable docker
+          systemctl start docker
+
+          # ---------------------------------------------------------------
+          # 3. Install Docker Compose v2 plugin
+          # ---------------------------------------------------------------
+          apt-get install -y docker-compose-plugin
+
+          # ---------------------------------------------------------------
+          # 4. Install & configure AWS CloudWatch Agent
+          # ---------------------------------------------------------------
+          wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/arm64/latest/amazon-cloudwatch-agent.deb
+          dpkg -i amazon-cloudwatch-agent.deb
+          rm amazon-cloudwatch-agent.deb
+
+          # CloudWatch Agent config
+          cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'CWCONFIG'
+          {
+            "agent": {
+              "metrics_collection_interval": 60,
+              "run_as_user": "root"
+            },
+            "metrics": {
+              "namespace": "OpenClaw/${EnvironmentName}",
+              "metrics_collected": {
+                "mem": {
+                  "measurement": ["mem_used_percent"],
+                  "metrics_collection_interval": 60
+                },
+                "disk": {
+                  "measurement": ["disk_used_percent"],
+                  "metrics_collection_interval": 300,
+                  "resources": ["/"]
+                }
+              }
+            },
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/user-data.log",
+                      "log_group_name": "/openclaw/${EnvironmentName}/user-data",
+                      "log_stream_name": "{instance_id}",
+                      "retention_in_days": 14
+                    },
+                    {
+                      "file_path": "/opt/openclaw/logs/*.log",
+                      "log_group_name": "/openclaw/${EnvironmentName}/app",
+                      "log_stream_name": "{instance_id}",
+                      "retention_in_days": 30
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          CWCONFIG
+
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+            -a fetch-config -m ec2 \
+            -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+
+          # ---------------------------------------------------------------
+          # 5. Ensure SSM Agent is running
+          # ---------------------------------------------------------------
+          systemctl enable amazon-ssm-agent
+          systemctl start amazon-ssm-agent
+
+          # ---------------------------------------------------------------
+          # 6. Create OpenClaw directory structure
+          # ---------------------------------------------------------------
+          mkdir -p /opt/openclaw/{docker,scripts,logs}
+          chown -R ubuntu:ubuntu /opt/openclaw
+
+          # ---------------------------------------------------------------
+          # 7. Write docker-compose.yml
+          # ---------------------------------------------------------------
+          cat > /opt/openclaw/docker/docker-compose.yml << 'DCOMPOSE'
+          services:
+            caddy:
+              image: caddy:2-alpine
+              ports:
+                - "80:80"
+                - "443:443"
+              volumes:
+                - ./Caddyfile:/etc/caddy/Caddyfile:ro
+                - caddy_data:/data
+                - caddy_config:/config
+              restart: unless-stopped
+              depends_on:
+                openclaw:
+                  condition: service_healthy
+              deploy:
+                resources:
+                  limits:
+                    memory: 128M
+                    cpus: '0.25'
+
+            openclaw:
+              image: openclaw/openclaw:latest
+              volumes:
+                - openclaw_workspace:/root/.openclaw/workspace
+                - openclaw_config:/root/.openclaw
+              healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:18789/healthz"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+                start_period: 60s
+              restart: unless-stopped
+              deploy:
+                resources:
+                  limits:
+                    memory: 3G
+                    cpus: '1.5'
+                  reservations:
+                    memory: 512M
+                    cpus: '0.25'
+
+          volumes:
+            openclaw_workspace:
+            openclaw_config:
+            caddy_data:
+            caddy_config:
+          DCOMPOSE
+
+          # ---------------------------------------------------------------
+          # 8. Write Caddyfile (placeholder — update with domain later)
+          # ---------------------------------------------------------------
+          cat > /opt/openclaw/docker/Caddyfile << 'CADDY'
+          # OpenClaw Reverse Proxy
+          # Replace :443 with your domain (e.g., openclaw.yourdomain.com)
+          # for automatic Let's Encrypt certificates.
+          # With just :443, Caddy uses a self-signed cert.
+          :443 {
+            reverse_proxy openclaw:18789
+
+            header {
+              Strict-Transport-Security "max-age=31536000; includeSubDomains"
+              X-Content-Type-Options "nosniff"
+              X-Frame-Options "DENY"
+              X-XSS-Protection "1; mode=block"
+              Referrer-Policy "strict-origin-when-cross-origin"
+            }
+
+            log {
+              output file /var/log/caddy/access.log
+              format json
+            }
+          }
+          CADDY
+
+          # ---------------------------------------------------------------
+          # 9. Write backup script
+          # ---------------------------------------------------------------
+          cat > /opt/openclaw/scripts/backup.sh << 'BACKUP'
+          #!/bin/bash
+          set -euo pipefail
+
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          BUCKET="${BackupBucketName}"
+          BACKUP_DIR="/tmp/openclaw-backups"
+          LOG_FILE="/opt/openclaw/logs/backup.log"
+
+          log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
+
+          log "Starting backup..."
+
+          mkdir -p "$BACKUP_DIR"
+
+          # Backup workspace (memory, identity, agent data)
+          docker run --rm \
+            -v openclaw_workspace:/data:ro \
+            -v "$BACKUP_DIR":/backup \
+            alpine tar -czf "/backup/workspace-${TIMESTAMP}.tar.gz" -C /data .
+
+          # Backup config (openclaw.json, agent settings)
+          docker run --rm \
+            -v openclaw_config:/data:ro \
+            -v "$BACKUP_DIR":/backup \
+            alpine tar -czf "/backup/config-${TIMESTAMP}.tar.gz" -C /data .
+
+          # Upload to S3
+          aws s3 cp "$BACKUP_DIR/workspace-${TIMESTAMP}.tar.gz" \
+            "s3://${BUCKET}/workspace/${TIMESTAMP}.tar.gz" \
+            --storage-class STANDARD_IA --region us-east-1
+
+          aws s3 cp "$BACKUP_DIR/config-${TIMESTAMP}.tar.gz" \
+            "s3://${BUCKET}/config/${TIMESTAMP}.tar.gz" \
+            --storage-class STANDARD_IA --region us-east-1
+
+          # Cleanup local temp
+          rm -rf "$BACKUP_DIR"
+
+          log "Backup completed: workspace-${TIMESTAMP}, config-${TIMESTAMP}"
+          BACKUP
+          chmod +x /opt/openclaw/scripts/backup.sh
+
+          # ---------------------------------------------------------------
+          # 10. Write restore script
+          # ---------------------------------------------------------------
+          cat > /opt/openclaw/scripts/restore.sh << 'RESTORE'
+          #!/bin/bash
+          set -euo pipefail
+
+          BUCKET="${BackupBucketName}"
+          RESTORE_DIR="/tmp/openclaw-restore"
+
+          echo "Available workspace backups:"
+          aws s3 ls "s3://${BUCKET}/workspace/" --region us-east-1 | tail -10
+
+          echo ""
+          read -p "Enter backup timestamp (e.g., 20260624-120000): " TIMESTAMP
+
+          if [ -z "$TIMESTAMP" ]; then
+            echo "ERROR: No timestamp provided. Aborting."
+            exit 1
+          fi
+
+          echo "WARNING: This will stop OpenClaw and replace current data."
+          read -p "Continue? (yes/no): " CONFIRM
+          if [ "$CONFIRM" != "yes" ]; then
+            echo "Aborted."
+            exit 0
+          fi
+
+          mkdir -p "$RESTORE_DIR"
+
+          # Stop services
+          cd /opt/openclaw/docker
+          docker compose down
+
+          # Download from S3
+          aws s3 cp "s3://${BUCKET}/workspace/${TIMESTAMP}.tar.gz" \
+            "$RESTORE_DIR/workspace.tar.gz" --region us-east-1
+
+          aws s3 cp "s3://${BUCKET}/config/${TIMESTAMP}.tar.gz" \
+            "$RESTORE_DIR/config.tar.gz" --region us-east-1 || echo "No config backup found, skipping."
+
+          # Restore workspace
+          docker run --rm \
+            -v openclaw_workspace:/data \
+            -v "$RESTORE_DIR":/backup \
+            alpine sh -c "rm -rf /data/* && tar -xzf /backup/workspace.tar.gz -C /data"
+
+          # Restore config (if available)
+          if [ -f "$RESTORE_DIR/config.tar.gz" ]; then
+            docker run --rm \
+              -v openclaw_config:/data \
+              -v "$RESTORE_DIR":/backup \
+              alpine sh -c "rm -rf /data/* && tar -xzf /backup/config.tar.gz -C /data"
+          fi
+
+          # Cleanup
+          rm -rf "$RESTORE_DIR"
+
+          # Restart services
+          docker compose up -d
+          echo "Restore completed. OpenClaw is starting..."
+          RESTORE
+          chmod +x /opt/openclaw/scripts/restore.sh
+
+          # ---------------------------------------------------------------
+          # 11. Setup backup cron (every 6 hours)
+          # ---------------------------------------------------------------
+          echo "0 */6 * * * /opt/openclaw/scripts/backup.sh >> /opt/openclaw/logs/backup.log 2>&1" | crontab -u ubuntu -
+
+          # ---------------------------------------------------------------
+          # 12. Unattended security upgrades
+          # ---------------------------------------------------------------
+          apt-get install -y unattended-upgrades
+          dpkg-reconfigure -f noninteractive unattended-upgrades
+
+          # ---------------------------------------------------------------
+          # 13. Start Docker Compose
+          # ---------------------------------------------------------------
+          cd /opt/openclaw/docker
+          sudo -u ubuntu docker compose pull
+          sudo -u ubuntu docker compose up -d
+
+          echo "=== OpenClaw Bootstrap COMPLETE — $(date) ==="
+          echo "Next step: Connect via SSM and run 'openclaw onboard'"
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-server'
+        - Key: Project
+          Value: !Ref EnvironmentName
+
+# ==============================================================================
+# Outputs
+# ==============================================================================
+Outputs:
+  InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref EC2Instance
+    Export:
+      Name: !Sub '${EnvironmentName}-InstanceId'
+
+  ElasticIP:
+    Description: Public Elastic IP address
+    Value: !Ref ElasticIP
+    Export:
+      Name: !Sub '${EnvironmentName}-ElasticIP'
+
+  BackupBucketArn:
+    Description: S3 Backup Bucket ARN
+    Value: !GetAtt BackupBucket.Arn
+
+  SSMConnectCommand:
+    Description: Command to connect via SSM Session Manager
+    Value: !Sub 'aws ssm start-session --target ${EC2Instance} --region ${AWS::Region}'

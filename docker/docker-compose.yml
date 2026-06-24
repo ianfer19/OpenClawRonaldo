@@ -1,0 +1,80 @@
+services:
+  # --------------------------------------------------------------------------
+  # Caddy — Reverse Proxy with Auto-TLS
+  # Optional: only needed if accessing OpenClaw Control UI via HTTPS
+  # Telegram long polling does NOT require this service
+  # --------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    container_name: openclaw-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    depends_on:
+      openclaw:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --------------------------------------------------------------------------
+  # OpenClaw — AI Agent Gateway
+  # --------------------------------------------------------------------------
+  openclaw:
+    image: openclaw/openclaw:latest
+    container_name: openclaw-gateway
+    volumes:
+      - openclaw_workspace:/root/.openclaw/workspace
+      - openclaw_config:/root/.openclaw
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18789/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: '1.5'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+# --------------------------------------------------------------------------
+# Persistent Volumes
+# --------------------------------------------------------------------------
+volumes:
+  # Agent memory, identity files, daily logs (MEMORY.md, SOUL.md, etc.)
+  openclaw_workspace:
+    name: openclaw_workspace
+
+  # Agent config, openclaw.json, API keys, agent settings
+  openclaw_config:
+    name: openclaw_config
+
+  # Caddy TLS certificates and state
+  caddy_data:
+    name: caddy_data
+
+  # Caddy runtime config
+  caddy_config:
+    name: caddy_config

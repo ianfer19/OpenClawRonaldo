@@ -1,0 +1,268 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OpenClaw Monitoring Stack — CloudWatch Alarms, SNS Notifications,
+  EC2 Auto-Recovery, and health check monitoring.
+
+# ==============================================================================
+# Parameters
+# ==============================================================================
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: openclaw-ronaldo
+    Description: Prefix for resource naming
+
+  NotificationEmail:
+    Type: String
+    Description: Email address for alarm notifications
+    AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    ConstraintDescription: Must be a valid email address
+
+  CPUAlarmThreshold:
+    Type: Number
+    Default: 80
+    MinValue: 50
+    MaxValue: 100
+    Description: CPU utilization percentage to trigger alarm
+
+  MemoryAlarmThreshold:
+    Type: Number
+    Default: 85
+    MinValue: 50
+    MaxValue: 100
+    Description: Memory utilization percentage to trigger alarm
+
+  DiskAlarmThreshold:
+    Type: Number
+    Default: 80
+    MinValue: 50
+    MaxValue: 95
+    Description: Disk utilization percentage to trigger alarm
+
+# ==============================================================================
+# Resources
+# ==============================================================================
+Resources:
+
+  # --------------------------------------------------------------------------
+  # SNS Topic — Alarm Notifications
+  # --------------------------------------------------------------------------
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${EnvironmentName}-alarms'
+      DisplayName: !Sub 'OpenClaw Alerts (${EnvironmentName})'
+      Tags:
+        - Key: Project
+          Value: !Ref EnvironmentName
+
+  AlarmSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # --------------------------------------------------------------------------
+  # CloudWatch Alarm — CPU Utilization
+  # --------------------------------------------------------------------------
+  CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-cpu-high'
+      AlarmDescription: !Sub 'CPU > ${CPUAlarmThreshold}% for 5 minutes'
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref CPUAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value:
+            Fn::ImportValue: !Sub '${EnvironmentName}-InstanceId'
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      TreatMissingData: breaching
+
+  # --------------------------------------------------------------------------
+  # CloudWatch Alarm — Memory Utilization (via CW Agent)
+  # --------------------------------------------------------------------------
+  MemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-memory-high'
+      AlarmDescription: !Sub 'Memory > ${MemoryAlarmThreshold}% for 5 minutes'
+      Namespace: !Sub 'OpenClaw/${EnvironmentName}'
+      MetricName: mem_used_percent
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref MemoryAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      TreatMissingData: breaching
+
+  # --------------------------------------------------------------------------
+  # CloudWatch Alarm — Disk Utilization (via CW Agent)
+  # --------------------------------------------------------------------------
+  DiskAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-disk-high'
+      AlarmDescription: !Sub 'Disk > ${DiskAlarmThreshold}% for 10 minutes'
+      Namespace: !Sub 'OpenClaw/${EnvironmentName}'
+      MetricName: disk_used_percent
+      Statistic: Average
+      Period: 600
+      EvaluationPeriods: 2
+      Threshold: !Ref DiskAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      TreatMissingData: breaching
+
+  # --------------------------------------------------------------------------
+  # CloudWatch Alarm — EC2 Status Check (Auto-Recovery)
+  # --------------------------------------------------------------------------
+  StatusCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-status-check-failed'
+      AlarmDescription: 'EC2 system status check failed — triggering auto-recovery'
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_System
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value:
+            Fn::ImportValue: !Sub '${EnvironmentName}-InstanceId'
+      # Auto-Recovery: moves instance to healthy hardware, preserves EBS + EIP
+      AlarmActions:
+        - !Sub 'arn:aws:automate:${AWS::Region}:ec2:recover'
+        - !Ref AlarmTopic
+      TreatMissingData: breaching
+
+  # --------------------------------------------------------------------------
+  # CloudWatch Alarm — Instance Status Check
+  # --------------------------------------------------------------------------
+  InstanceStatusAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-instance-check-failed'
+      AlarmDescription: 'EC2 instance status check failed'
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_Instance
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value:
+            Fn::ImportValue: !Sub '${EnvironmentName}-InstanceId'
+      AlarmActions:
+        - !Ref AlarmTopic
+      TreatMissingData: breaching
+
+  # --------------------------------------------------------------------------
+  # CloudWatch Dashboard
+  # --------------------------------------------------------------------------
+  MonitoringDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${EnvironmentName}-dashboard'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "CPU Utilization",
+                "metrics": [
+                  ["AWS/EC2", "CPUUtilization", "InstanceId", "${EC2InstanceId}"]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Memory Utilization",
+                "metrics": [
+                  ["OpenClaw/${EnvironmentName}", "mem_used_percent"]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "Disk Utilization",
+                "metrics": [
+                  ["OpenClaw/${EnvironmentName}", "disk_used_percent"]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "Network (Bytes In/Out)",
+                "metrics": [
+                  ["AWS/EC2", "NetworkIn", "InstanceId", "${EC2InstanceId}"],
+                  ["AWS/EC2", "NetworkOut", "InstanceId", "${EC2InstanceId}"]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "view": "timeSeries"
+              }
+            }
+          ]
+        }
+
+  # Placeholder — resolved via Fn::ImportValue at deploy time
+  EC2InstanceId:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Metadata:
+      InstanceId:
+        Fn::ImportValue: !Sub '${EnvironmentName}-InstanceId'
+
+# ==============================================================================
+# Outputs
+# ==============================================================================
+Outputs:
+  AlarmTopicArn:
+    Description: SNS Topic ARN for alarm notifications
+    Value: !Ref AlarmTopic
+
+  DashboardURL:
+    Description: CloudWatch Dashboard URL
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${EnvironmentName}-dashboard'
