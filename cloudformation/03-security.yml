@@ -1,4 +1,4 @@
-AWSTemplateFormatVersion: '2010-09-09'
+STemplateFormatVersion: '2010-09-09'
 Description: >
   OpenClaw Security Stack — Security Groups with minimal attack surface.
   Telegram long polling = no inbound ports required for messaging.
@@ -43,7 +43,7 @@ Resources:
         Security group for OpenClaw EC2 instance.
         Inbound: HTTPS/HTTP for Control UI (optional).
         Outbound: HTTPS for LLM APIs + Telegram API, DNS.
-        SSH disabled — access via SSM Session Manager only.
+        SSH disabled - access via SSM Session Manager only.
       VpcId:
         Fn::ImportValue: !Sub '${EnvironmentName}-VpcId'
       Tags:
@@ -64,7 +64,7 @@ Resources:
       FromPort: 443
       ToPort: 443
       CidrIp: '0.0.0.0/0'
-      Description: 'HTTPS — OpenClaw Control UI via Caddy (optional)'
+      Description: 'HTTPS - OpenClaw Control UI via Caddy (optional)'
 
   IngressHTTP:
     Type: AWS::EC2::SecurityGroupIngress
@@ -75,7 +75,7 @@ Resources:
       FromPort: 80
       ToPort: 80
       CidrIp: '0.0.0.0/0'
-      Description: 'HTTP — Redirect to HTTPS via Caddy'
+      Description: 'HTTP - Redirect to HTTPS via Caddy'
 
   # --------------------------------------------------------------------------
   # Outbound Rules — Explicitly defined (deny-all-except)
@@ -88,7 +88,7 @@ Resources:
       FromPort: 443
       ToPort: 443
       CidrIp: '0.0.0.0/0'
-      Description: 'HTTPS — LLM APIs (Claude/OpenAI/Gemini) + Telegram API + npm'
+      Description: 'HTTPS - LLM APIs (Claude/OpenAI/Gemini) + Telegram API + npm'
 
   EgressDNSUDP:
     Type: AWS::EC2::SecurityGroupEgress
@@ -118,7 +118,7 @@ Resources:
       FromPort: 80
       ToPort: 80
       CidrIp: '0.0.0.0/0'
-      Description: 'HTTP — Package downloads, Let''s Encrypt ACME challenges'
+      Description: 'HTTP - Package downloads, Let''s Encrypt ACME challenges'
 
 # ==============================================================================
 # Outputs
