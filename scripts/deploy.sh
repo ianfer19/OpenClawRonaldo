@@ -53,13 +53,15 @@ log "AWS Account: ${ACCOUNT_ID}"
 
 # Validate all templates first
 info "Validating CloudFormation templates..."
+cd "$CF_DIR"
 for template in 01-network.yml 03-security.yml 02-compute.yml 04-monitoring.yml; do
   aws cloudformation validate-template \
-    --template-body "file://${CF_DIR}/${template}" \
+    --template-body "file://${template}" \
     --region "$REGION" > /dev/null 2>&1 \
     && log "  ${template} — valid" \
     || err "  ${template} — INVALID"
 done
+cd - > /dev/null
 
 # --------------------------------------------------------------------------
 # Deploy function
@@ -90,10 +92,10 @@ deploy_stack() {
     done
   fi
 
-  # Deploy
+  cd "$CF_DIR"
   aws cloudformation ${ACTION} \
     --stack-name "$STACK_NAME" \
-    --template-body "file://${CF_DIR}/${TEMPLATE}" \
+    --template-body "file://${TEMPLATE}" \
     --capabilities CAPABILITY_NAMED_IAM \
     --region "$REGION" \
     ${PARAM_ARGS} \
@@ -101,10 +103,12 @@ deploy_stack() {
       # Check if it's a "no updates" situation
       if [ "$ACTION" = "update-stack" ]; then
         warn "No updates needed for ${STACK_NAME}"
+        cd - > /dev/null
         return 0
       fi
       err "Failed to deploy ${STACK_NAME}"
     }
+  cd - > /dev/null
 
   # Wait for completion
   info "Waiting for ${STACK_NAME} to complete..."

@@ -90,7 +90,7 @@ Resources:
       CidrIp: '0.0.0.0/0'
       Description: 'HTTPS — LLM APIs (Claude/OpenAI/Gemini) + Telegram API + npm'
 
-  EgressDNS_UDP:
+  EgressDNSUDP:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
       GroupId: !Ref OpenClawSecurityGroup
@@ -100,7 +100,7 @@ Resources:
       CidrIp: '0.0.0.0/0'
       Description: 'DNS resolution (UDP)'
 
-  EgressDNS_TCP:
+  EgressDNSTCP:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
       GroupId: !Ref OpenClawSecurityGroup
