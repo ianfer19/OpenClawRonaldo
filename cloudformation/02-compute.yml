@@ -192,9 +192,6 @@ Resources:
             VolumeSize: !Ref VolumeSize
             VolumeType: gp3
             Encrypted: true
-            DeleteOnTermination: false
-            Iops: 3000
-            Throughput: 125
       # IMDSv2 enforced — prevents SSRF credential theft
       MetadataOptions:
         HttpEndpoint: enabled

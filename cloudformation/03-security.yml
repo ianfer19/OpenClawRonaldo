@@ -1,4 +1,4 @@
-STemplateFormatVersion: '2010-09-09'
+AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   OpenClaw Security Stack — Security Groups with minimal attack surface.
   Telegram long polling = no inbound ports required for messaging.
@@ -39,11 +39,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub '${EnvironmentName}-sg'
-      GroupDescription: >
-        Security group for OpenClaw EC2 instance.
-        Inbound: HTTPS/HTTP for Control UI (optional).
-        Outbound: HTTPS for LLM APIs + Telegram API, DNS.
-        SSH disabled - access via SSM Session Manager only.
+      GroupDescription: 'Security group for OpenClaw EC2 instance. Inbound: HTTP/S optional. Outbound: HTTPS, DNS. SSH via SSM.'
       VpcId:
         Fn::ImportValue: !Sub '${EnvironmentName}-VpcId'
       Tags:
@@ -118,7 +114,7 @@ Resources:
       FromPort: 80
       ToPort: 80
       CidrIp: '0.0.0.0/0'
-      Description: 'HTTP - Package downloads, Let''s Encrypt ACME challenges'
+      Description: 'HTTP - Package downloads, Lets Encrypt ACME challenges'
 
 # ==============================================================================
 # Outputs
